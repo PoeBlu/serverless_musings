@@ -95,34 +95,27 @@ def resumeAutoscaleTransition(autoscaleGroupName, autoscaleLifecycleHookName, in
 def getIpAddressesFromRoute53Entry(route53ZoneId, hostRecordToMaintain):
     client = boto3.client('route53')
     currentRecordSets = client.list_resource_record_sets(HostedZoneId=route53ZoneId)
-    
+
     resourceRecordSet = {}
     for recordSet in currentRecordSets["ResourceRecordSets"]:
         if ((recordSet["Name"] == hostRecordToMaintain) and (recordSet["Type"] == "A")):
             currentResourceRecordSet = recordSet
-    
-    ipAddresses = []
-    for resourceRecord in resourceRecordSet:
-        ipAddresses.append(resourceRecord["Value"])
-    
-    return ipAddresses
+
+    return [resourceRecord["Value"] for resourceRecord in resourceRecordSet]
 
     
 # Set the Route53 RecordSet to the IP Addresses provided.
 def setDNSRecord(route53ZoneId, hostRecordToMaintain, ipAddresses = []):
     client = boto3.client('route53')
-    
-    resourceRecords = []
-    for ipAddress in ipAddresses:
-        resourceRecords.append({"Value": ipAddress})
-    
+
+    resourceRecords = [{"Value": ipAddress} for ipAddress in ipAddresses]
     resourceRecordSet={
           "Name": "host.proxyfleet.",
           "Type": "A",
           "TTL": 300,
           "ResourceRecords": resourceRecords
         }
-    
+
     response = client.change_resource_record_sets(
         HostedZoneId=route53ZoneId,
         ChangeBatch={
@@ -147,14 +140,13 @@ def baselineIpAddressesInDNS(route53ZoneId, hostRecordToMaintain, autoscaleGroup
     response = client.describe_auto_scaling_groups(
         AutoScalingGroupNames=[autoscaleGroupName]
     )
-    
-    ipAddresses = []
-    
-    for instance in response["AutoScalingGroups"][0]["Instances"]:
-        ipAddresses.append(getIPofInstance(instance["InstanceId"]))
-    
+
+    ipAddresses = [
+        getIPofInstance(instance["InstanceId"])
+        for instance in response["AutoScalingGroups"][0]["Instances"]
+    ]
     setDNSRecord(route53ZoneId, hostRecordToMaintain, ipAddresses)
-        
+
     return ""
 
 
@@ -176,36 +168,36 @@ def lambda_handler(event, context):
             and (event["source"] == "aws.autoscaling")
             and (event["detail-type"] == "EC2 Instance-launch Lifecycle Action")
             and ("EC2InstanceId" in event["detail"])):
-            
+
             instanceId = event["detail"]["EC2InstanceId"]
             lifecycleTransition = event["detail"]["LifecycleTransition"]
             autoscaleLifecycleHookName = event["detail"]["LifecycleHookName"]
-            
+
             newInstancePublicIP = getIPofInstance(instanceId)
-                
+
             if (lifecycleTransition == "autoscaling:EC2_INSTANCE_LAUNCHING"):
                 ipAddresses = getIpAddressesFromRoute53Entry(route53ZoneId, hostRecordToMaintain)
                 ipAddresses.append(newInstancePublicIP)
                 setDNSRecord(route53ZoneId, hostRecordToMaintain, ipAddresses)
                 print("Success: Host record updated to include the new instance public IP address.")
-                
+
             elif (lifecycleTransition == "autoscaling:EC2_INSTANCE_TERMINATING"):
                 ipAddresses = getIpAddressesFromRoute53Entry(route53ZoneId, hostRecordToMaintain)
                 ipAddresses.remove(newInstancePublicIP)
                 setDNSRecord(route53ZoneId, hostRecordToMaintain, ipAddresses)
                 print("Success: Host record updated to remove the retiring instance public IP address.")
-                
+
             else:
                 print("Error: No valid lifecycle transition identified.")
-                    
+
             resumeAutoscaleTransition(autoscaleGroupName, autoscaleLifecycleHookName, instanceId)
-            
+
         else:
             baselineIpAddressesInDNS(route53ZoneId, hostRecordToMaintain, autoscaleGroupName)
             print("Success: Host record reset with current instance public IP addresses for autoscale group.")
-        
+
     except Exception as e:
-        print("Error: An exception occured: " + str(e))
-        
+        print(f"Error: An exception occured: {str(e)}")
+
     finally:
         return ""
